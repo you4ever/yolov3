@@ -1,6 +1,7 @@
 from utils.google_utils import *
 from utils.layers import *
 from utils.parse_config import *
+import sparseconvnet as scn
 
 ONNX_EXPORT = False
 
@@ -45,6 +46,43 @@ def create_modules(module_defs, img_size, cfg):
 
             if mdef['activation'] == 'leaky':  # activation study https://github.com/ultralytics/yolov3/issues/441
                 modules.add_module('activation', nn.LeakyReLU(0.1, inplace=True))
+            elif mdef['activation'] == 'swish':
+                modules.add_module('activation', Swish())
+            elif mdef['activation'] == 'mish':
+                modules.add_module('activation', Mish())
+
+        elif mdef['type'] == 'sparse_convolutional':
+            bn = mdef['batch_normalize']
+            filters = mdef['filters']
+            k = mdef['size']  # kernel size
+            stride = mdef['stride'] if 'stride' in mdef else (mdef['stride_y'], mdef['stride_x'])
+            if isinstance(k, int):  # single-size conv
+                module = scn.Sequential().add(
+                    scn.DenseToSparse(2)).add(
+                    scn.SubmanifoldConvolution(dimension = 2, 
+                                                       nIn=output_filters[-1],
+                                                       nOut=filters,
+                                                       filter_size=3,
+                                                       groups=mdef['groups'] if 'groups' in mdef else 1,
+                                                       bias=not bn)).add(
+                    scn.SparseToDense(2, filters))
+
+
+                modules.add_module('Conv2d', module)
+            else:  # multiple-size conv
+                modules.add_module('MixConv2d', MixConv2d(in_ch=output_filters[-1],
+                                                          out_ch=filters,
+                                                          k=k,
+                                                          stride=stride,
+                                                          bias=not bn))
+
+            if bn:
+                modules.add_module('BatchNorm2d', nn.BatchNorm2d(filters, momentum=0.03, eps=1E-4))
+            else:
+                routs.append(i)  # detection output (goes into yolo layer)
+
+            if mdef['activation'] == 'leaky':  # activation study https://github.com/ultralytics/yolov3/issues/441
+                modules.add_module('activation', scn.LeakyReLU(0.1, inplace=True))
             elif mdef['activation'] == 'swish':
                 modules.add_module('activation', Swish())
             elif mdef['activation'] == 'mish':
