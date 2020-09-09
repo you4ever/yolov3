@@ -34,6 +34,22 @@ class FeatureConcat(nn.Module):
     def forward(self, x, outputs):
         return torch.cat([outputs[i] for i in self.layers], 1) if self.multiple else outputs[self.layers[0]]
 
+class SparseFeatureConcat(nn.Module):
+    def __init__(self, layers):
+        super(SparseFeatureConcat, self).__init__()
+        self.layers = layers  # layer indices
+        self.multiple = len(layers) > 1  # multiple layers flag
+
+    def forward(self, x, outputs):
+        if self.multiple:
+            out_features = torch.cat([outputs[i].features for i in self.layers], 0) 
+            out = outputs[self.layers[0]]
+            out.features = out_features
+            return out
+        else:
+            return outputs[self.layers[0]]
+        return torch.cat([outputs[i] for i in self.layers], 1) if self.multiple else outputs[self.layers[0]]
+
 
 class WeightedFeatureFusion(nn.Module):  # weighted sum of 2 or more layers https://arxiv.org/abs/1911.09070
     def __init__(self, layers, weight=False):
@@ -65,6 +81,38 @@ class WeightedFeatureFusion(nn.Module):  # weighted sum of 2 or more layers http
                 x = x + a[:, :nx]
 
         return x
+
+class SparseWeightedFeatureFusion(nn.Module):  # weighted sum of 2 or more layers https://arxiv.org/abs/1911.09070
+    def __init__(self, layers, weight=False):
+        super(SparseWeightedFeatureFusion, self).__init__()
+        self.layers = layers  # layer indices
+        self.weight = weight  # apply weights boolean
+        self.n = len(layers) + 1  # number of layers
+        if weight:
+            self.w = nn.Parameter(torch.zeros(self.n), requires_grad=True)  # layer weights
+
+    def forward(self, x, outputs):
+        # Weights
+        if self.weight:
+            w = torch.sigmoid(self.w) * (2 / self.n)  # sigmoid weights (0-1)
+            x = x * w[0]
+
+        # Fusion
+        nx = x.features.shape[1]  # input channels
+        for i in range(self.n - 1):
+            a = outputs[self.layers[i]] * w[i + 1] if self.weight else outputs[self.layers[i]]  # feature to add
+            na = a.features.shape[1]  # feature channels
+
+            # Adjust channels
+            if nx == na:  # same shape
+                x.features = x.features + a.features
+            elif nx > na:  # slice input
+                x[:, :na] = x[:, :na] + a  # or a = nn.ZeroPad2d((0, 0, 0, 0, 0, dc))(a); x = x + a
+            else:  # slice feature
+                x = x + a[:, :nx]
+
+        return x
+
 
 
 class MixConv2d(nn.Module):  # MixConv: Mixed Depthwise Convolutional Kernels https://arxiv.org/abs/1907.09595

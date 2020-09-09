@@ -50,7 +50,24 @@ def create_modules(module_defs, img_size, cfg):
                 modules.add_module('activation', Swish())
             elif mdef['activation'] == 'mish':
                 modules.add_module('activation', Mish())
-
+        elif mdef['type'] == 'sparse_res_net':
+            filters = mdef['output_filters']
+            module = scn.SparseResNet(2, 8, [
+                                ['b', 8, 2, 1],
+                                ['b', 16, 2, 2],
+                                ['b', 24, 2, 2],
+                                ['b', 32, 2, 2]])
+            modules.add_module('SparseResNet', module)
+        elif mdef['type'] == 'dense_to_sparse':
+            filters = output_filters[-1]
+            dim = mdef['dim']
+            module = scn.DenseToSparse(dim)
+            modules.add_module('DenseToSparse', module)
+        elif mdef['type'] == 'sparse_to_dense':
+            dim = mdef['dim']
+            nOut = mdef['nout']
+            module = scn.SparseToDense(dim, nOut)
+            modules.add_module('SparseToDense', module)
         elif mdef['type'] == 'sparse_convolutional':
             bn = mdef['batch_normalize']
             filters = mdef['filters']
@@ -58,14 +75,12 @@ def create_modules(module_defs, img_size, cfg):
             stride = mdef['stride'] if 'stride' in mdef else (mdef['stride_y'], mdef['stride_x'])
             if isinstance(k, int):  # single-size conv
                 module = scn.Sequential().add(
-                    scn.DenseToSparse(2)).add(
                     scn.SubmanifoldConvolution(dimension = 2, 
                                                        nIn=output_filters[-1],
                                                        nOut=filters,
                                                        filter_size=3,
                                                        groups=mdef['groups'] if 'groups' in mdef else 1,
-                                                       bias=not bn)).add(
-                    scn.SparseToDense(2, filters))
+                                                       bias=not bn))
 
 
                 modules.add_module('Conv2d', module)
@@ -82,11 +97,57 @@ def create_modules(module_defs, img_size, cfg):
                 routs.append(i)  # detection output (goes into yolo layer)
 
             if mdef['activation'] == 'leaky':  # activation study https://github.com/ultralytics/yolov3/issues/441
-                modules.add_module('activation', scn.LeakyReLU(0.1, inplace=True))
+                modules.add_module('activation', scn.LeakyReLU(0.1))
             elif mdef['activation'] == 'swish':
                 modules.add_module('activation', Swish())
             elif mdef['activation'] == 'mish':
                 modules.add_module('activation', Mish())
+
+        elif mdef['type'] == 'sparse_res_module':
+            bn = mdef['batch_normalize']
+            activation = mdef['activation']
+            filters = [output_filters[-1],] + mdef['filters']
+            k = mdef['size']  # kernel size
+            strides = mdef['strides'] if 'strides' in mdef else (mdef['stride_y'], mdef['stride_x'])
+            m = scn.Sequential()
+            for fi, fo, si, st in zip(filters[0:-1], filters[1:], k, strides):
+                m.add(
+                    scn.SubmanifoldConvolution(
+                        dimension=2, 
+                        nIn=fi,
+                        nOut=fo,
+                        filter_size=si,
+                        bias=False
+                    ) if st == 1 else scn.Convolution(
+                        dimension=2,
+                        nIn=fi,
+                        nOut=fo,
+                        filter_size=si,
+                        filter_stride=st,
+                        bias=False
+                    )
+                ).add(
+                    scn.BatchNormLeakyReLU(fo, momentum=0.03, eps=1E-4, leakiness=0.1) 
+                        if activation=='leaky' else scn.BatchNormReLU(fi, momentum=0.03, eps=1E-4)
+                )
+
+            if any([st>1 for st in strides]):
+                res = scn.Convolution(2, filters[0], filters[-1], k[0], strides[0], False)
+            elif filters[0] != filters[-1]:
+                res = scn.NetworkInNetwork(filters[0], filters[-1], False)
+            else:
+                res = scn.Identity()
+            
+            modules = scn.Sequential().add(
+                    scn.ConcatTable().add(
+                        m
+                    ).add(
+                        res
+                    )
+                )
+            modules.add(scn.AddTable())
+            routs.extend([i + l if l < 0 else l for l in [-1]])
+            filters = filters[-1]
 
         elif mdef['type'] == 'BatchNorm2d':
             filters = output_filters[-1]
@@ -106,6 +167,16 @@ def create_modules(module_defs, img_size, cfg):
             else:
                 modules = maxpool
 
+        elif mdef['type'] == 'sparse_maxpool':
+            k = mdef['size']  # kernel size
+            stride = mdef['stride']
+            maxpool = scn.MaxPooling(dimension=2, pool_size=k, pool_stride=stride)
+            if k == 2 and stride == 1:  # yolov3-tiny
+                modules.add_module('ZeroPad2d', nn.ZeroPad2d((0, 1, 0, 1)))
+                modules.add_module('MaxPool2d', maxpool)
+            else:
+                modules = maxpool
+
         elif mdef['type'] == 'upsample':
             if ONNX_EXPORT:  # explicitly state size, avoid scale_factor
                 g = (yolo_index + 1) * 2 / 32  # gain
@@ -119,11 +190,23 @@ def create_modules(module_defs, img_size, cfg):
             routs.extend([i + l if l < 0 else l for l in layers])
             modules = FeatureConcat(layers=layers)
 
+        elif mdef['type'] == 'sparse_route':  # nn.Sequential() placeholder for 'route' layer
+            layers = mdef['layers']
+            filters = sum([output_filters[l + 1 if l > 0 else l] for l in layers])
+            routs.extend([i + l if l < 0 else l for l in layers])
+            modules = SparseFeatureConcat(layers=layers)
+
         elif mdef['type'] == 'shortcut':  # nn.Sequential() placeholder for 'shortcut' layer
             layers = mdef['from']
             filters = output_filters[-1]
             routs.extend([i + l if l < 0 else l for l in layers])
             modules = WeightedFeatureFusion(layers=layers, weight='weights_type' in mdef)
+
+        elif mdef['type'] == 'sparse_shortcut':  # nn.Sequential() placeholder for 'shortcut' layer
+            layers = mdef['from']
+            filters = output_filters[-1]
+            routs.extend([i + l if l < 0 else l for l in layers])
+            modules = SparseWeightedFeatureFusion(layers=layers, weight='weights_type' in mdef)
 
         elif mdef['type'] == 'reorg3d':  # yolov3-spp-pan-scale
             pass
@@ -324,7 +407,7 @@ class Darknet(nn.Module):
 
         for i, module in enumerate(self.module_list):
             name = module.__class__.__name__
-            if name in ['WeightedFeatureFusion', 'FeatureConcat']:  # sum, concat
+            if name in ['WeightedFeatureFusion', 'FeatureConcat' , 'SparseWeightedFeatureFusion', 'SparseFeatureConcat']:  # sum, concat
                 if verbose:
                     l = [i - 1] + module.layers  # layers
                     sh = [list(x.shape)] + [list(out[i].shape) for i in module.layers]  # shapes

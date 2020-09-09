@@ -19,7 +19,7 @@ def parse_model_cfg(path):
         if line.startswith('['):  # This marks the start of a new block
             mdefs.append({})
             mdefs[-1]['type'] = line[1:-1].rstrip()
-            if mdefs[-1]['type'] == 'convolutional':
+            if mdefs[-1]['type'] == 'convolutional' or mdefs[-1]['type'] == 'sparse_convolutional':
                 mdefs[-1]['batch_normalize'] = 0  # pre-populate with zeros (may be overwritten later)
         else:
             key, val = line.split("=")
@@ -27,7 +27,7 @@ def parse_model_cfg(path):
 
             if key == 'anchors':  # return nparray
                 mdefs[-1][key] = np.array([float(x) for x in val.split(',')]).reshape((-1, 2))  # np anchors
-            elif (key in ['from', 'layers', 'mask']) or (key == 'size' and ',' in val):  # return array
+            elif (key in ['from', 'layers', 'mask']) or ((key in ['size', 'filters', 'strides']) and ',' in val):  # return array
                 mdefs[-1][key] = [int(x) for x in val.split(',')]
             else:
                 val = val.strip()
@@ -41,7 +41,8 @@ def parse_model_cfg(path):
     supported = ['type', 'batch_normalize', 'filters', 'size', 'stride', 'pad', 'activation', 'layers', 'groups',
                  'from', 'mask', 'anchors', 'classes', 'num', 'jitter', 'ignore_thresh', 'truth_thresh', 'random',
                  'stride_x', 'stride_y', 'weights_type', 'weights_normalization', 'scale_x_y', 'beta_nms', 'nms_kind',
-                 'iou_loss', 'iou_normalizer', 'cls_normalizer', 'iou_thresh', 'probability']
+                 'iou_loss', 'iou_normalizer', 'cls_normalizer', 'iou_thresh', 'probability', 
+                 'dim', 'dimension', 'input_planes','output_filters','nout','strides']
 
     f = []  # fields
     for x in mdefs[1:]:

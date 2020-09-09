@@ -276,6 +276,7 @@ def train(hyp):
                     imgs = F.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)
 
             # Forward
+            imgs[imgs<0.5] = 0.
             pred = model(imgs)
 
             # Loss
@@ -412,7 +413,7 @@ if __name__ == '__main__':
     parser.add_argument('--freeze-layers', action='store_true', help='Freeze non-output layers')  
     opt = parser.parse_args()
     opt.weights = last if opt.resume and not opt.weights else opt.weights
-    check_git_status()
+    # check_git_status()
     opt.cfg = check_file(opt.cfg)  # check file
     opt.data = check_file(opt.data)  # check file
     print(opt)
@@ -420,6 +421,9 @@ if __name__ == '__main__':
     device = torch_utils.select_device(opt.device, apex=mixed_precision, batch_size=opt.batch_size)
     if device.type == 'cpu':
         mixed_precision = False
+
+    # torch.set_default_tensor_type(torch.half)
+
 
     # scale hyp['obj'] by img_size (evolved at 320)
     # hyp['obj'] *= opt.img_size[0] / 320.
